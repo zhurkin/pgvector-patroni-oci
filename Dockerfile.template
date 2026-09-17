@@ -1,0 +1,105 @@
+ARG PGVECTOR_IMAGE=@@PGVECTOR_IMAGE@@
+
+
+# ============================================================
+# Stage 1: Resolve dependencies and build wheelhouse
+#
+# requirements.lock is generated separately and committed.
+# This stage builds/downloads all required wheels.
+# ============================================================
+FROM ${PGVECTOR_IMAGE} AS wheelhouse
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
+        python3-pip \
+        python3-dev \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/build-venv
+
+COPY requirements.lock /tmp/requirements.lock
+
+RUN mkdir -p /wheelhouse \
+    && /opt/build-venv/bin/python -m pip wheel \
+        --wheel-dir=/wheelhouse \
+        --prefer-binary \
+        --require-hashes \
+        -r /tmp/requirements.lock
+
+
+# ============================================================
+# Stage 2: Assemble CLEAN Patroni venv
+#
+# No Internet/PyPI access is used here.
+# The environment is assembled only from our wheelhouse.
+# ============================================================
+FROM ${PGVECTOR_IMAGE} AS patroni-venv
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=wheelhouse /wheelhouse /wheelhouse
+COPY requirements.lock /tmp/requirements.lock
+
+RUN python3 -m venv /opt/patroni/venv \
+    && /opt/patroni/venv/bin/python -m pip install \
+        --no-index \
+        --find-links=/wheelhouse \
+        --require-hashes \
+        -r /tmp/requirements.lock \
+    && /opt/patroni/venv/bin/python -m pip check \
+    && /opt/patroni/venv/bin/python -c \
+        'import patroni; import patroni.dcs.kubernetes; import psycopg; print("PATRONI_VENV_OK", psycopg.__version__, psycopg.pq.__impl__)' \
+    && /opt/patroni/venv/bin/patroni --version \
+    && /opt/patroni/venv/bin/patronictl version
+
+
+# ============================================================
+# Stage 3: Production runtime
+# ============================================================
+FROM ${PGVECTOR_IMAGE} AS runtime
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Immutable Patroni runtime.
+# root:root intentionally: postgres can read/execute but cannot modify it.
+COPY --from=patroni-venv \
+    --chown=0:0 \
+    /opt/patroni/venv \
+    /opt/patroni/venv
+
+# Configuration is read-only for postgres; runtime directory is writable.
+RUN install -d -o root -g postgres -m 0750 /etc/patroni \
+    && install -d -o postgres -g postgres -m 0750 /run/patroni
+
+ENV VIRTUAL_ENV="/opt/patroni/venv" \
+    PATH="/opt/patroni/venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 5432 8008
+
+# PID1 is tini -> Patroni, so Patroni should receive the normal SIGTERM.
+STOPSIGNAL SIGTERM
+
+USER postgres
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/patroni/venv/bin/patroni"]
+CMD ["/etc/patroni/patroni.yml"]
