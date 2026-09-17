@@ -1,0 +1,7 @@
+#
+# NOTE: THIS FILE IS GENERATED VIA "apply-templates.sh"
+#
+# PLEASE DO NOT EDIT IT DIRECTLY.
+#
+
+patroni[psycopg3]==%%PATRONI_VERSION%%
