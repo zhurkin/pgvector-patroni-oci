@@ -110,11 +110,14 @@ RUN apt-get update \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
+# Patroni runtime is immutable for the postgres user.
 COPY --from=patroni-venv \
     --chown=0:0 \
     /opt/patroni/venv \
     /opt/patroni/venv
 
+# Configuration is read-only for postgres.
+# Runtime state is writable by postgres.
 RUN install -d \
         -o root \
         -g postgres \
@@ -133,6 +136,7 @@ ENV VIRTUAL_ENV="/opt/patroni/venv" \
 
 EXPOSE 5432 8008
 
+# PID1 is tini -> Patroni, not postgres.
 STOPSIGNAL SIGTERM
 
 USER postgres
