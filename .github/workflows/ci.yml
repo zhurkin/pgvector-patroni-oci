@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: PostgreSQL 18 / trixie
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Verify generated files
+        shell: bash
+        run: |
+          bash ./apply-templates.sh
+
+          git diff --exit-code -- \
+            18/trixie/Dockerfile \
+            18/trixie/requirements.in
+
+      - name: Build image
+        shell: bash
+        run: |
+          docker build \
+            --pull \
+            --tag pgvector-patroni:ci \
+            18/trixie
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          docker run --rm \
+            --entrypoint /bin/sh \
+            pgvector-patroni:ci \
+            -ec '
+              echo "=== USER ==="
+              id
+              test "$(id -un)" = "postgres"
+
+              echo
+              echo "=== POSTGRES ==="
+              postgres --version
+              postgres --version | grep -F "PostgreSQL 18."
+
+              echo
+              echo "=== PGVECTOR ==="
+              test -f /usr/share/postgresql/18/extension/vector.control
+              grep -F "default_version = '\''0.8.6'\''" \
+                /usr/share/postgresql/18/extension/vector.control
+
+              echo
+              echo "=== PATRONI ==="
+              test "$(patroni --version)" = "patroni 4.1.5"
+              test "$(patronictl version)" = "patronictl version 4.1.5"
+
+              echo
+              echo "=== PYTHON ==="
+              python --version
+              python -m pip check
+
+              echo
+              echo "=== PSYCOPG ==="
+              python -c "
+          import psycopg
+          assert psycopg.__version__ == \"3.3.5\"
+          assert psycopg.pq.__impl__ == \"binary\"
+          print(\"PSYCOPG_OK\", psycopg.__version__, psycopg.pq.__impl__)
+          "
+
+              echo
+              echo "=== KUBERNETES DCS ==="
+              python -c "
+          import patroni.dcs.kubernetes
+          print(\"KUBERNETES_DCS_OK\")
+          "
+
+              echo
+              echo "=== PGDATA ==="
+              test "$PGDATA" = "/var/lib/postgresql/18/docker"
+              echo "$PGDATA"
+
+              echo
+              echo "=== DIRECTORIES ==="
+              test "$(stat -c "%U:%G:%a" /etc/patroni)" = "root:postgres:750"
+              test "$(stat -c "%U:%G:%a" /run/patroni)" = "postgres:postgres:750"
+
+              stat -c "%U:%G:%a %n" \
+                /etc/patroni \
+                /run/patroni
+
+              echo
+              echo "ALL TESTS PASSED"
+            '
