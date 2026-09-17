@@ -1,0 +1,53 @@
+name: Update generated files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: Update generated files
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Update generated files
+        shell: bash
+        run: |
+          bash ./update.sh
+
+      - name: Verify generated files
+        shell: bash
+        run: |
+          bash ./apply-templates.sh
+          git diff --check
+
+      - name: Show changes
+        shell: bash
+        run: |
+          git status --short
+          git --no-pager diff
+
+      - name: Commit generated files
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            versions.json \
+            18/trixie/Dockerfile \
+            18/trixie/requirements.in \
+            18/trixie/requirements.lock
+
+          git commit -m "Update generated build files"
+          git push
