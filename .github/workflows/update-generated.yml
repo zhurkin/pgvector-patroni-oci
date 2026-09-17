@@ -35,7 +35,29 @@ jobs:
       - name: Commit generated files
         shell: bash
         run: |
-          if git diff --quiet; then
+          mapfile -t generated_files < <(
+            python3 <<'PY'
+          import json
+
+          with open("versions.json", "r", encoding="utf-8") as f:
+              versions = json.load(f)
+
+          for major, major_data in versions.items():
+              for variant in major_data.get("variants", []):
+                  prefix = f"{major}/{variant}"
+
+                  print(f"{prefix}/Dockerfile")
+                  print(f"{prefix}/requirements.in")
+                  print(f"{prefix}/requirements.lock")
+          PY
+          )
+
+          printf 'Generated files:\n'
+          printf '  %s\n' "${generated_files[@]}"
+
+          git add -- "${generated_files[@]}"
+
+          if git diff --cached --quiet; then
             echo "No generated changes."
             exit 0
           fi
@@ -43,10 +65,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add \
-            18/trixie/Dockerfile \
-            18/trixie/requirements.in \
-            18/trixie/requirements.lock
+          git diff --cached --check
+          git --no-pager diff --cached
 
           git commit -m "Update generated build files"
           git push
