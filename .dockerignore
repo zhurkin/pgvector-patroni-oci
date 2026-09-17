@@ -1,0 +1,10 @@
+.git
+.github
+.gitignore
+README.md
+Dockerfile.template
+apply-templates.sh
+generate-lock.sh
+versions.json
+requirements.in
+*.md
