@@ -14,7 +14,7 @@ command -v python3 >/dev/null 2>&1 || {
     exit 1
 }
 
-./apply-templates.sh
+bash ./apply-templates.sh
 
 while IFS=$'\t' read -r \
     major \
