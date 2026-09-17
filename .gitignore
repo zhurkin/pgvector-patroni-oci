@@ -1,8 +1,13 @@
 # Generated from Dockerfile.template
 Dockerfile
 
-# Local/editor files
+# Editor files
+*~
 *.swp
 *.swo
-*~
+
+# OS metadata
 .DS_Store
+
+# Temporary files
+*.tmp
