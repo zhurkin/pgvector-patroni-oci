@@ -11,9 +11,74 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: PostgreSQL 18 / trixie
+  matrix:
+    name: Prepare build matrix
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+
+    outputs:
+      builds: ${{ steps.matrix.outputs.builds }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Generate build matrix
+        id: matrix
+        shell: bash
+        run: |
+          builds="$(
+            python3 <<'PY'
+          import json
+
+          with open("versions.json", "r", encoding="utf-8") as f:
+              versions = json.load(f)
+
+          include = []
+
+          for major, major_data in versions.items():
+              for variant in major_data.get("variants", []):
+                  data = major_data[variant]
+
+                  include.append({
+                      "postgres": data["postgres"],
+                      "variant": variant,
+                      "pgvector": data["pgvector"],
+                      "patroni": data["patroni"],
+                      "base_image": data["baseImage"],
+                      "context": f"{major}/{variant}",
+                  })
+
+          print(
+              json.dumps(
+                  {"include": include},
+                  separators=(",", ":"),
+              )
+          )
+          PY
+          )"
+
+          echo "Build matrix:"
+          echo "$builds" | python3 -m json.tool
+
+          echo "builds=$builds" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: PostgreSQL ${{ matrix.postgres }} / ${{ matrix.variant }}
+    needs:
+      - matrix
+
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.builds) }}
+
+    env:
+      BUILD_CONTEXT: ${{ matrix.context }}
+      BASE_IMAGE: ${{ matrix.base_image }}
+      POSTGRES_MAJOR: ${{ matrix.postgres }}
+      PGVECTOR_VERSION: ${{ matrix.pgvector }}
+      PATRONI_VERSION: ${{ matrix.patroni }}
 
     steps:
       - name: Checkout
@@ -25,8 +90,12 @@ jobs:
           bash ./apply-templates.sh
 
           git diff --exit-code -- \
-            18/trixie/Dockerfile \
-            18/trixie/requirements.in
+            "${BUILD_CONTEXT}/Dockerfile" \
+            "${BUILD_CONTEXT}/requirements.in"
+
+          grep -Fx \
+            "patroni==${PATRONI_VERSION}" \
+            "${BUILD_CONTEXT}/requirements.lock"
 
       - name: Build image
         shell: bash
@@ -34,13 +103,33 @@ jobs:
           docker build \
             --pull \
             --tag pgvector-patroni:ci \
-            18/trixie
+            "${BUILD_CONTEXT}"
+
+      - name: Get upstream PGDATA
+        id: upstream
+        shell: bash
+        run: |
+          pgdata="$(
+            docker run --rm \
+              --entrypoint /bin/sh \
+              "${BASE_IMAGE}" \
+              -c 'printf "%s" "$PGDATA"'
+          )"
+
+          echo "Upstream PGDATA: ${pgdata}"
+          echo "pgdata=${pgdata}" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test
         shell: bash
+        env:
+          EXPECTED_PGDATA: ${{ steps.upstream.outputs.pgdata }}
         run: |
           docker run --rm -i \
             --entrypoint /bin/sh \
+            -e "EXPECTED_POSTGRES_MAJOR=${POSTGRES_MAJOR}" \
+            -e "EXPECTED_PGVECTOR_VERSION=${PGVECTOR_VERSION}" \
+            -e "EXPECTED_PATRONI_VERSION=${PATRONI_VERSION}" \
+            -e "EXPECTED_PGDATA=${EXPECTED_PGDATA}" \
             pgvector-patroni:ci \
             -e <<'SH'
           set -eu
@@ -52,18 +141,31 @@ jobs:
           echo
           echo "=== POSTGRES ==="
           postgres --version
-          postgres --version | grep -E 'PostgreSQL\) 18\.'
+
+          test "$PG_MAJOR" = "$EXPECTED_POSTGRES_MAJOR"
+
+          postgres --version \
+            | grep -F "PostgreSQL) ${EXPECTED_POSTGRES_MAJOR}."
 
           echo
           echo "=== PGVECTOR ==="
-          test -f /usr/share/postgresql/18/extension/vector.control
-          grep -F "default_version = '0.8.6'" \
-            /usr/share/postgresql/18/extension/vector.control
+
+          vector_control="/usr/share/postgresql/${EXPECTED_POSTGRES_MAJOR}/extension/vector.control"
+
+          test -f "$vector_control"
+
+          grep -F \
+            "default_version = '${EXPECTED_PGVECTOR_VERSION}'" \
+            "$vector_control"
 
           echo
           echo "=== PATRONI ==="
-          test "$(patroni --version)" = "patroni 4.1.5"
-          test "$(patronictl version)" = "patronictl version 4.1.5"
+
+          test "$(patroni --version)" \
+            = "patroni ${EXPECTED_PATRONI_VERSION}"
+
+          test "$(patronictl version)" \
+            = "patronictl version ${EXPECTED_PATRONI_VERSION}"
 
           echo
           echo "=== PYTHON ==="
@@ -72,15 +174,22 @@ jobs:
 
           echo
           echo "=== PSYCOPG ==="
+
           python -c '
           import psycopg
-          assert psycopg.__version__ == "3.3.5"
+
           assert psycopg.pq.__impl__ == "binary"
-          print("PSYCOPG_OK", psycopg.__version__, psycopg.pq.__impl__)
+
+          print(
+              "PSYCOPG_OK",
+              psycopg.__version__,
+              psycopg.pq.__impl__,
+          )
           '
 
           echo
           echo "=== KUBERNETES DCS ==="
+
           python -c '
           import patroni.dcs.kubernetes
           print("KUBERNETES_DCS_OK")
@@ -88,15 +197,22 @@ jobs:
 
           echo
           echo "=== PGDATA ==="
-          test "$PGDATA" = "/var/lib/postgresql/18/docker"
-          echo "$PGDATA"
+
+          echo "upstream: $EXPECTED_PGDATA"
+          echo "runtime:  $PGDATA"
+
+          test "$PGDATA" = "$EXPECTED_PGDATA"
 
           echo
           echo "=== DIRECTORIES ==="
-          test "$(stat -c '%U:%G:%a' /etc/patroni)" = "root:postgres:750"
-          test "$(stat -c '%U:%G:%a' /run/patroni)" = "postgres:postgres:750"
 
-          stat -c '%U:%G:%a %n' \
+          test "$(stat -c '%U:%G:%a' /etc/patroni)" \
+            = "root:postgres:750"
+
+          test "$(stat -c '%U:%G:%a' /run/patroni)" \
+            = "postgres:postgres:750"
+
+          stat -c '%U:%G:%:a %n' \
             /etc/patroni \
             /run/patroni
 
