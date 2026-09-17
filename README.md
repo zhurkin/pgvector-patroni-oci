@@ -1,26 +1,15 @@
 # pgvector-patroni-oci
 
-OCI image build for PostgreSQL with pgvector and Patroni.
+OCI image builds for PostgreSQL with pgvector and Patroni.
 
-The image is based on the pgvector PostgreSQL image and adds an isolated
-Patroni runtime environment with pinned Python dependencies.
+## Available builds
 
-## Current build
+| PostgreSQL | Debian | pgvector | Patroni |
+|---|---|---|---|
+| 18 | trixie | 0.8.6 | 4.1.5 |
 
-| Component | Version |
-| --- | --- |
-| PostgreSQL | 18 |
-| pgvector | 0.8.6 |
-| Patroni | 4.1.5 |
-| Debian | trixie |
+Generated Dockerfiles are available in the corresponding version directories.
 
-## Repository layout
+For PostgreSQL 18 / Debian trixie:
 
-Generated build contexts are stored by PostgreSQL version and distribution:
-
-```text
-18/
-└── trixie/
-    ├── Dockerfile
-    ├── requirements.in
-    └── requirements.lock
+`18/trixie/Dockerfile`
