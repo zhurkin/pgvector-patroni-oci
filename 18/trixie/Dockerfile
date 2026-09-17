@@ -1,1 +1,141 @@
 #
+# NOTE: THIS DOCKERFILE IS GENERATED VIA "apply-templates.sh"
+#
+# PLEASE DO NOT EDIT IT DIRECTLY.
+#
+
+ARG PGVECTOR_IMAGE=pgvector/pgvector:0.8.6-pg18-trixie
+
+
+# ============================================================
+# Stage 1: Build wheelhouse
+#
+# Runtime dependencies come from requirements.lock.
+#
+# Source distributions may be built into wheels here.
+# Build tools do not reach the final image.
+# ============================================================
+FROM ${PGVECTOR_IMAGE} AS wheelhouse
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
+        python3-pip \
+        python3-dev \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/build-venv \
+    && /opt/build-venv/bin/python -m pip install \
+        --no-cache-dir \
+        --upgrade \
+        pip==26.2.1 \
+        setuptools==84.0.0 \
+        wheel==0.48.0
+
+COPY requirements.lock /tmp/requirements.lock
+
+RUN mkdir -p /wheelhouse \
+    \
+    && /opt/build-venv/bin/python -m pip wheel \
+        --wheel-dir=/wheelhouse \
+        --prefer-binary \
+        -r /tmp/requirements.lock \
+    \
+    && /opt/build-venv/bin/python -m pip download \
+        --only-binary=:all: \
+        --dest=/wheelhouse \
+        pip==26.2.1 \
+        setuptools==84.0.0 \
+        wheel==0.48.0
+
+
+# ============================================================
+# Stage 2: Assemble clean Patroni virtual environment
+#
+# No Internet/PyPI access is used here.
+# Everything is installed from the wheelhouse.
+# ============================================================
+FROM ${PGVECTOR_IMAGE} AS patroni-venv
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=wheelhouse /wheelhouse /wheelhouse
+COPY requirements.lock /tmp/requirements.lock
+
+RUN python3 -m venv /opt/patroni/venv \
+    \
+    && /opt/patroni/venv/bin/python -m pip install \
+        --no-index \
+        --find-links=/wheelhouse \
+        --upgrade \
+        pip==26.2.1 \
+        setuptools==84.0.0 \
+        wheel==0.48.0 \
+    \
+    && /opt/patroni/venv/bin/python -m pip install \
+        --no-index \
+        --find-links=/wheelhouse \
+        -r /tmp/requirements.lock \
+    \
+    && /opt/patroni/venv/bin/python -m pip check \
+    \
+    && /opt/patroni/venv/bin/python -c \
+        'import patroni; import patroni.dcs.kubernetes; import psycopg; print("PATRONI_VENV_OK", psycopg.__version__, psycopg.pq.__impl__)' \
+    \
+    && test "$(/opt/patroni/venv/bin/patroni --version)" = "patroni 4.1.5" \
+    && test "$(/opt/patroni/venv/bin/patronictl version)" = "patronictl version 4.1.5"
+
+
+# ============================================================
+# Stage 3: Production runtime
+# ============================================================
+FROM ${PGVECTOR_IMAGE} AS runtime
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=patroni-venv \
+    --chown=0:0 \
+    /opt/patroni/venv \
+    /opt/patroni/venv
+
+RUN install -d \
+        -o root \
+        -g postgres \
+        -m 0750 \
+        /etc/patroni \
+    && install -d \
+        -o postgres \
+        -g postgres \
+        -m 0750 \
+        /run/patroni
+
+ENV VIRTUAL_ENV="/opt/patroni/venv" \
+    PATH="/opt/patroni/venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 5432 8008
+
+STOPSIGNAL SIGTERM
+
+USER postgres
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/patroni/venv/bin/patroni"]
+CMD ["/etc/patroni/patroni.yml"]
