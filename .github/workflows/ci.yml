@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     name: PostgreSQL 18 / trixie
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
 
     steps:
       - name: Checkout
