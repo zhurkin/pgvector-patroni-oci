@@ -50,7 +50,7 @@ jobs:
               echo
               echo "=== POSTGRES ==="
               postgres --version
-              postgres --version | grep -F "PostgreSQL 18."
+              postgres --version | grep -E 'PostgreSQL\) 18\.'
 
               echo
               echo "=== PGVECTOR ==="
