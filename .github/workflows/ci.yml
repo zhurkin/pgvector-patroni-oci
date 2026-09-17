@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-  pull_request:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -22,12 +21,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $GITHUB_REF_NAME"
+            echo "Expected format: vX.Y.Z"
+            exit 1
+          fi
+
+          echo "Release tag: $GITHUB_REF_NAME"
+
       - name: Generate build matrix
         id: matrix
         shell: bash
         run: |
-          builds="$(
-            python3 <<'PY'
+          python3 <<'PY' > /tmp/build-matrix.json
           import json
 
           with open("versions.json", "r", encoding="utf-8") as f:
@@ -55,15 +65,17 @@ jobs:
               )
           )
           PY
-          )"
 
           echo "Build matrix:"
-          echo "$builds" | python3 -m json.tool
+          python3 -m json.tool /tmp/build-matrix.json
 
-          echo "builds=$builds" >> "$GITHUB_OUTPUT"
+          printf 'builds=%s\n' \
+            "$(cat /tmp/build-matrix.json)" \
+            >> "$GITHUB_OUTPUT"
 
   build:
     name: PostgreSQL ${{ matrix.postgres }} / ${{ matrix.variant }}
+
     needs:
       - matrix
 
@@ -212,7 +224,7 @@ jobs:
           test "$(stat -c '%U:%G:%a' /run/patroni)" \
             = "postgres:postgres:750"
 
-          stat -c '%U:%G:%:a %n' \
+          stat -c '%U:%G:%a %n' \
             /etc/patroni \
             /run/patroni
 
