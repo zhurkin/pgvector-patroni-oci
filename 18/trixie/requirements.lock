@@ -12,8 +12,8 @@ packaging==26.3
 patroni==4.1.5
 prettytable==3.18.0
 psutil==7.2.2
-psycopg==3.3.5
 psycopg-binary==3.3.5
+psycopg==3.3.5
 py-consul==1.7.1
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3
