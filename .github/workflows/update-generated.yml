@@ -1,290 +1,79 @@
-name: Build and Publish
+name: Update generated files
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
-  contents: read
-
-env:
-  OCI_IMAGE: zhurkinvs/pgvector-patroni
+  contents: write
 
 jobs:
-  matrix:
-    name: Prepare build matrix
+  update:
+    name: Update generated files
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
-
-    outputs:
-      builds: ${{ steps.matrix.outputs.builds }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Validate release tag
-        if: github.event_name == 'push'
+      - name: Update generated files
         shell: bash
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid release tag: $GITHUB_REF_NAME"
-            echo "Expected format: vX.Y.Z"
-            exit 1
-          fi
-
-          echo "Release tag: $GITHUB_REF_NAME"
-
-      - name: Generate build matrix
-        id: matrix
-        shell: bash
-        run: |
-          python3 <<'PY' > /tmp/build-matrix.json
-          import json
-
-          with open("versions.json", "r", encoding="utf-8") as f:
-              versions = json.load(f)
-
-          include = []
-
-          for major, major_data in versions.items():
-              for variant in major_data.get("variants", []):
-                  data = major_data[variant]
-
-                  pgvector_parts = data["pgvector"].split(".")
-                  pgvector_line = ".".join(pgvector_parts[:2])
-
-                  patroni_major = data["patroni"].split(".")[0]
-
-                  include.append({
-                      "postgres": data["postgres"],
-                      "variant": variant,
-                      "pgvector": data["pgvector"],
-                      "pgvector_line": pgvector_line,
-                      "patroni": data["patroni"],
-                      "patroni_major": patroni_major,
-                      "base_image": data["baseImage"],
-                      "context": f"{major}/{variant}",
-                  })
-
-          print(
-              json.dumps(
-                  {"include": include},
-                  separators=(",", ":"),
-              )
-          )
-          PY
-
-          echo "Build matrix:"
-          python3 -m json.tool /tmp/build-matrix.json
-
-          printf 'builds=%s\n' \
-            "$(cat /tmp/build-matrix.json)" \
-            >> "$GITHUB_OUTPUT"
-
-  build:
-    name: PostgreSQL ${{ matrix.postgres }} / ${{ matrix.variant }}
-
-    needs:
-      - matrix
-
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
-
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.matrix.outputs.builds) }}
-
-    env:
-      BUILD_CONTEXT: ${{ matrix.context }}
-      BASE_IMAGE: ${{ matrix.base_image }}
-      POSTGRES_MAJOR: ${{ matrix.postgres }}
-      PGVECTOR_VERSION: ${{ matrix.pgvector }}
-      PGVECTOR_LINE: ${{ matrix.pgvector_line }}
-      PATRONI_VERSION: ${{ matrix.patroni }}
-      PATRONI_MAJOR: ${{ matrix.patroni_major }}
-      VARIANT: ${{ matrix.variant }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+          bash ./update.sh
 
       - name: Verify generated files
         shell: bash
         run: |
           bash ./apply-templates.sh
+          git diff --check
 
-          git diff --exit-code -- \
-            "${BUILD_CONTEXT}/Dockerfile" \
-            "${BUILD_CONTEXT}/requirements.in"
-
-          grep -Fx \
-            "patroni==${PATRONI_VERSION}" \
-            "${BUILD_CONTEXT}/requirements.lock"
-
-      - name: Resolve image tag
-        id: image
+      - name: Show changes
         shell: bash
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            release="${GITHUB_REF_NAME#v}"
-          else
-            release="test"
+          git status --short
+          git --no-pager diff
+
+      - name: Stage generated files
+        shell: bash
+        run: |
+          mapfile -t generated_files < <(
+            python3 <<'PY'
+          import json
+
+          with open("versions.json", "r", encoding="utf-8") as f:
+              versions = json.load(f)
+
+          for major, major_data in versions.items():
+              for variant in major_data.get("variants", []):
+                  prefix = f"{major}/{variant}"
+
+                  print(f"{prefix}/Dockerfile")
+                  print(f"{prefix}/requirements.in")
+                  print(f"{prefix}/requirements.lock")
+          PY
+          )
+
+          echo "Generated files:"
+
+          printf '  %s\n' "${generated_files[@]}"
+
+          git add -- "${generated_files[@]}"
+
+      - name: Commit generated files
+        shell: bash
+        run: |
+          if git diff --cached --quiet; then
+            echo "No generated changes."
+            exit 0
           fi
 
-          image_tag="${release}-pg${POSTGRES_MAJOR}-pgv${PGVECTOR_LINE}-patroni${PATRONI_MAJOR}-${VARIANT}"
+          git diff --cached --check
 
-          echo "release=${release}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
-
-          echo
-          echo "Release:"
-          echo "  ${release}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           echo
-          echo "Image:"
-          echo "  ${OCI_IMAGE}:${image_tag}"
+          echo "Changes to commit:"
+          git --no-pager diff --cached
 
-      - name: Build image
-        shell: bash
-        run: |
-          docker build \
-            --pull \
-            --label "org.opencontainers.image.version=${{ steps.image.outputs.release }}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            --label "io.zhurkin.postgresql.version=${POSTGRES_MAJOR}" \
-            --label "io.zhurkin.pgvector.version=${PGVECTOR_VERSION}" \
-            --label "io.zhurkin.patroni.version=${PATRONI_VERSION}" \
-            --tag "${OCI_IMAGE}:${{ steps.image.outputs.image_tag }}" \
-            "${BUILD_CONTEXT}"
-
-      - name: Get upstream PGDATA
-        id: upstream
-        shell: bash
-        run: |
-          pgdata="$(
-            docker run --rm \
-              --entrypoint /bin/sh \
-              "${BASE_IMAGE}" \
-              -c 'printf "%s" "$PGDATA"'
-          )"
-
-          echo "Upstream PGDATA: ${pgdata}"
-          echo "pgdata=${pgdata}" >> "$GITHUB_OUTPUT"
-
-      - name: Smoke test
-        shell: bash
-        env:
-          EXPECTED_PGDATA: ${{ steps.upstream.outputs.pgdata }}
-          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
-        run: |
-          docker run --rm -i \
-            --entrypoint /bin/sh \
-            -e "EXPECTED_POSTGRES_MAJOR=${POSTGRES_MAJOR}" \
-            -e "EXPECTED_PGVECTOR_VERSION=${PGVECTOR_VERSION}" \
-            -e "EXPECTED_PATRONI_VERSION=${PATRONI_VERSION}" \
-            -e "EXPECTED_PGDATA=${EXPECTED_PGDATA}" \
-            "${OCI_IMAGE}:${IMAGE_TAG}" \
-            -e <<'SH'
-          set -eu
-
-          echo "=== USER ==="
-          id
-          test "$(id -un)" = "postgres"
-
-          echo
-          echo "=== POSTGRES ==="
-          postgres --version
-
-          test "$PG_MAJOR" = "$EXPECTED_POSTGRES_MAJOR"
-
-          postgres --version \
-            | grep -F "PostgreSQL) ${EXPECTED_POSTGRES_MAJOR}."
-
-          echo
-          echo "=== PGVECTOR ==="
-
-          vector_control="/usr/share/postgresql/${EXPECTED_POSTGRES_MAJOR}/extension/vector.control"
-
-          test -f "$vector_control"
-
-          grep -F \
-            "default_version = '${EXPECTED_PGVECTOR_VERSION}'" \
-            "$vector_control"
-
-          echo
-          echo "=== PATRONI ==="
-
-          test "$(patroni --version)" \
-            = "patroni ${EXPECTED_PATRONI_VERSION}"
-
-          test "$(patronictl version)" \
-            = "patronictl version ${EXPECTED_PATRONI_VERSION}"
-
-          echo
-          echo "=== PYTHON ==="
-          python --version
-          python -m pip check
-
-          echo
-          echo "=== PSYCOPG ==="
-
-          python -c '
-          import psycopg
-
-          assert psycopg.pq.__impl__ == "binary"
-
-          print(
-              "PSYCOPG_OK",
-              psycopg.__version__,
-              psycopg.pq.__impl__,
-          )
-          '
-
-          echo
-          echo "=== KUBERNETES DCS ==="
-
-          python -c '
-          import patroni.dcs.kubernetes
-          print("KUBERNETES_DCS_OK")
-          '
-
-          echo
-          echo "=== PGDATA ==="
-
-          echo "upstream: $EXPECTED_PGDATA"
-          echo "runtime:  $PGDATA"
-
-          test "$PGDATA" = "$EXPECTED_PGDATA"
-
-          echo
-          echo "=== DIRECTORIES ==="
-
-          test "$(stat -c '%U:%G:%a' /etc/patroni)" \
-            = "root:postgres:750"
-
-          test "$(stat -c '%U:%G:%a' /run/patroni)" \
-            = "postgres:postgres:750"
-
-          stat -c '%U:%G:%a %n' \
-            /etc/patroni \
-            /run/patroni
-
-          echo
-          echo "ALL TESTS PASSED"
-          SH
-
-      - name: Login to Docker Hub
-        if: github.event_name == 'push'
-        uses: docker/login-action@v4
-        with:
-          username: zhurkinvs
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push image
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          docker push \
-            "${OCI_IMAGE}:${{ steps.image.outputs.image_tag }}"
+          git commit -m "Update generated build files"
+          git push
