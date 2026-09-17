@@ -9,7 +9,7 @@ permissions:
 jobs:
   update:
     name: Update generated files
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
 
     steps:
       - name: Checkout
@@ -44,7 +44,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add \
-            versions.json \
             18/trixie/Dockerfile \
             18/trixie/requirements.in \
             18/trixie/requirements.lock
